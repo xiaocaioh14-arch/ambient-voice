@@ -1,0 +1,7 @@
+.build/
+.swiftpm/
+libs/llama.cpp/
+*.o
+*.a
+DerivedData/
+.DS_Store

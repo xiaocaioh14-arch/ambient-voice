@@ -1,0 +1,16 @@
+{
+  "version": "1",
+  "updated_at": "",
+  "models": {
+    "base": {
+      "file": "qwen3-0.6b.gguf",
+      "sha256": "",
+      "size": 0
+    },
+    "adapter": {
+      "file": "sa-adapter.gguf",
+      "sha256": "",
+      "size": 0
+    }
+  }
+}

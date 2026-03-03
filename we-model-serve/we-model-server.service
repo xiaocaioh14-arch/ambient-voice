@@ -1,0 +1,24 @@
+[Unit]
+Description=WE Model Distribution Server
+After=network.target
+
+[Service]
+Type=simple
+User=we-serve
+Group=we-serve
+WorkingDirectory=/opt/we-model-serve
+ExecStart=/usr/bin/python3 /opt/we-model-serve/server.py --port 9191 --dir /opt/we-model-serve
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/we-model-serve
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
