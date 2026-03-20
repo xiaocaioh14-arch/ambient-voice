@@ -37,6 +37,17 @@ final class VoiceSession: @unchecked Sendable {
     var onStateChange: ((State) -> Void)?
     var onPartialResult: ((String) -> Void)?
 
+    /// When true, saves audio to ~/.we/audio/ for distillation training data.
+    var saveAudio: Bool = false
+
+    /// Screen context keywords injected into SFSpeechRecognitionRequest.contextualStrings.
+    /// This biases the recognizer at transcription time — prevention, not correction.
+    var contextualStrings: [String] = []
+
+    /// Path of saved audio file after recording stops.
+    private(set) var savedAudioPath: String?
+    private var audioFile: AVAudioFile?
+
     /// Continuation used to bridge the callback-based recognition task to async/await in `stop()`.
     private var finalResultContinuation: CheckedContinuation<Void, Never>?
 
@@ -76,10 +87,28 @@ final class VoiceSession: @unchecked Sendable {
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
 
+        // Validate audio format — some device configurations return invalid formats.
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            cleanup()
+            throw SessionError.audioEngineFailure(
+                NSError(domain: "VoiceSession", code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "Invalid audio input format: sampleRate=\(format.sampleRate) channels=\(format.channelCount)"])
+            )
+        }
+
         // 5. Create recognition request
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.taskHint = .dictation
+
+        // Inject screen context keywords to bias recognition at transcription time.
+        // This is "prevention, not correction" — the recognizer uses these strings
+        // to prefer matching candidates when doing homophone disambiguation.
+        if !contextualStrings.isEmpty {
+            request.contextualStrings = contextualStrings
+            DebugLog.log(.voice, "Injected \(contextualStrings.count) contextual strings into recognizer")
+        }
+
         self.recognitionRequest = request
 
         // 6. Start recognition task
@@ -104,12 +133,19 @@ final class VoiceSession: @unchecked Sendable {
             }
         }
 
-        // 7. Install audio tap on input node
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            request.append(buffer)
+        // 7. Set up audio file for saving (if distillation enabled)
+        if saveAudio {
+            setupAudioFile(format: format)
         }
 
-        // 8. Start audio engine
+        // 8. Install audio tap on input node
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+            request.append(buffer)
+            // Write to file for distillation if enabled
+            try? self?.audioFile?.write(from: buffer)
+        }
+
+        // 9. Start audio engine
         do {
             try engine.start()
         } catch {
@@ -160,11 +196,32 @@ final class VoiceSession: @unchecked Sendable {
 
     // MARK: - Private
 
+    private func setupAudioFile(format: AVAudioFormat) {
+        let fm = FileManager.default
+        let audioDir = fm.homeDirectoryForCurrentUser
+            .appendingPathComponent(".we/audio")
+        try? fm.createDirectory(at: audioDir, withIntermediateDirectories: true)
+
+        let filename = "voice-\(ISO8601DateFormatter().string(from: Date())).caf"
+        let url = audioDir.appendingPathComponent(filename)
+
+        // Write in the input format; conversion to 16kHz mono can happen in the distill pipeline
+        do {
+            audioFile = try AVAudioFile(forWriting: url, settings: format.settings)
+            savedAudioPath = url.path
+        } catch {
+            DebugLog.log(.voice, "Failed to create audio file: \(error)", level: .warning)
+            audioFile = nil
+            savedAudioPath = nil
+        }
+    }
+
     private func cleanup() {
         recognitionTask?.cancel()
         recognitionTask = nil
         recognitionRequest = nil
         audioEngine = nil
         recognizer = nil
+        audioFile = nil
     }
 }

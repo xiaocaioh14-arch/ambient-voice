@@ -31,14 +31,28 @@ final class TextInjector {
     ///   - text: The text to insert.
     ///   - app: The target application identity (pinned at recording start).
     /// - Returns: The method that was used for insertion.
+    /// Apps where AX insertion doesn't work correctly — use clipboard directly.
+    private static let clipboardOnlyBundleIDs: Set<String> = [
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "com.mitchellh.ghostty",
+    ]
+
+    /// Whether the given bundle ID is a terminal app (uses clipboard injection).
+    static func isTerminalApp(_ bundleID: String) -> Bool {
+        clipboardOnlyBundleIDs.contains(bundleID)
+    }
+
     @discardableResult
     static func insert(_ text: String, into app: AppIdentity) -> InjectionMethod {
-        if tryAXInsertion(text, pid: app.processID) {
+        // Some apps (terminals) don't respond well to AX value setting — go straight to clipboard.
+        if !clipboardOnlyBundleIDs.contains(app.bundleID),
+           tryAXInsertion(text, pid: app.processID) {
             DebugLog.log(.pipeline, "Text injected via AX into \(app.appName)")
             return .accessibility
         }
 
-        clipboardInsertion(text)
+        clipboardInsertion(text, pid: app.processID)
         DebugLog.log(.pipeline, "Text injected via clipboard into \(app.appName)")
         return .clipboard
     }
@@ -86,53 +100,40 @@ final class TextInjector {
 
         let axElement = element as! AXUIElement
 
-        // First try: set the value directly (works for simple text fields).
-        let setResult = AXUIElementSetAttributeValue(
+        // Best method: set AXSelectedText to replace selection / insert at cursor.
+        // This is the correct AX API for inserting text — it doesn't touch
+        // the rest of the field content, just like a user typing.
+        let selectedTextResult = AXUIElementSetAttributeValue(
             axElement,
-            kAXValueAttribute as CFString,
+            kAXSelectedTextAttribute as CFString,
             text as CFTypeRef
         )
-        if setResult == .success {
+        if selectedTextResult == .success {
+            DebugLog.log(.pipeline, "AX insert via kAXSelectedTextAttribute succeeded")
             return true
         }
 
-        // Second try: use AXSelectedTextRange to insert at cursor position.
-        // Get current value, selected range, and compose the new value.
+        // Fallback: only set the full value if the field is currently empty.
+        // If the field has existing text, return false so we use clipboard
+        // insertion (which naturally inserts at cursor position).
         var currentValue: AnyObject?
         let getResult = AXUIElementCopyAttributeValue(
             axElement,
             kAXValueAttribute as CFString,
             &currentValue
         )
-
-        if getResult == .success, let currentText = currentValue as? String {
-            var selectedRange: AnyObject?
-            let rangeResult = AXUIElementCopyAttributeValue(
-                axElement,
-                kAXSelectedTextRangeAttribute as CFString,
-                &selectedRange
-            )
-
-            if rangeResult == .success, let rangeValue = selectedRange {
-                var cfRange = CFRange(location: 0, length: 0)
-                if AXValueGetValue(rangeValue as! AXValue, .cfRange, &cfRange) {
-                    // Build new text with insertion at the selected range.
-                    let nsText = currentText as NSString
-                    let newText = nsText.replacingCharacters(
-                        in: NSRange(location: cfRange.location, length: cfRange.length),
-                        with: text
-                    )
-                    let finalResult = AXUIElementSetAttributeValue(
-                        axElement,
-                        kAXValueAttribute as CFString,
-                        newText as CFTypeRef
-                    )
-                    return finalResult == .success
-                }
-            }
+        if getResult == .success, let currentText = currentValue as? String, !currentText.isEmpty {
+            DebugLog.log(.pipeline, "AX selectedText failed, field has text — falling back to clipboard")
+            return false
         }
 
-        return false
+        // Field is empty or unreadable — safe to set value directly.
+        let setResult = AXUIElementSetAttributeValue(
+            axElement,
+            kAXValueAttribute as CFString,
+            text as CFTypeRef
+        )
+        return setResult == .success
     }
 
     // MARK: - Clipboard Insertion
@@ -143,7 +144,13 @@ final class TextInjector {
     /// the original clipboard after a short delay.
     ///
     /// - Parameter text: The text to insert via clipboard.
-    private static func clipboardInsertion(_ text: String) {
+    private static func clipboardInsertion(_ text: String, pid: pid_t) {
+        // Activate the target app to ensure it receives the paste event.
+        if let runningApp = NSRunningApplication(processIdentifier: pid) {
+            runningApp.activate()
+            Thread.sleep(forTimeInterval: 0.15)
+        }
+
         let pasteboard = NSPasteboard.general
 
         // Save current clipboard contents.
@@ -153,8 +160,12 @@ final class TextInjector {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
 
-        // Simulate Cmd+V keystroke.
-        simulateKeyPress(keyCode: 9, flags: .maskCommand) // V key = keyCode 9
+        // Try AX menu press first (works even with Secure Keyboard Entry),
+        // fall back to CGEvent Cmd+V simulation.
+        if !triggerPasteViaMenu(pid: pid) {
+            DebugLog.log(.pipeline, "AX menu paste failed, falling back to CGEvent")
+            simulatePasteViaCGEvent()
+        }
 
         // Restore original clipboard after a delay to allow paste to complete.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -165,22 +176,66 @@ final class TextInjector {
         }
     }
 
-    /// Simulate a key press using CGEvent.
-    ///
-    /// Posts both key-down and key-up events with the specified modifier flags.
-    ///
-    /// - Parameters:
-    ///   - keyCode: The virtual key code to simulate.
-    ///   - flags: The modifier flags (e.g., .maskCommand for Cmd).
-    private static func simulateKeyPress(keyCode: CGKeyCode, flags: CGEventFlags) {
+    /// Trigger paste by pressing the Paste menu item via Accessibility API.
+    /// This bypasses Secure Keyboard Entry restrictions that block CGEvent injection.
+    private static func triggerPasteViaMenu(pid: pid_t) -> Bool {
+        let appElement = AXUIElementCreateApplication(pid)
+
+        var menuBarRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(appElement, kAXMenuBarAttribute as CFString, &menuBarRef) == .success else {
+            return false
+        }
+
+        var menuBarItems: AnyObject?
+        guard AXUIElementCopyAttributeValue(menuBarRef as! AXUIElement, kAXChildrenAttribute as CFString, &menuBarItems) == .success,
+              let topMenus = menuBarItems as? [AXUIElement] else {
+            return false
+        }
+
+        // Find "Edit" menu (handle English + Chinese localization).
+        for topMenu in topMenus {
+            var title: AnyObject?
+            AXUIElementCopyAttributeValue(topMenu, kAXTitleAttribute as CFString, &title)
+            guard let menuTitle = title as? String,
+                  menuTitle == "Edit" || menuTitle == "编辑" else { continue }
+
+            // Get the submenu children.
+            var submenuRef: AnyObject?
+            guard AXUIElementCopyAttributeValue(topMenu, kAXChildrenAttribute as CFString, &submenuRef) == .success,
+                  let submenus = submenuRef as? [AXUIElement],
+                  let editMenu = submenus.first else { continue }
+
+            var menuItems: AnyObject?
+            guard AXUIElementCopyAttributeValue(editMenu, kAXChildrenAttribute as CFString, &menuItems) == .success,
+                  let items = menuItems as? [AXUIElement] else { continue }
+
+            // Find "Paste" menu item.
+            for item in items {
+                var itemTitle: AnyObject?
+                AXUIElementCopyAttributeValue(item, kAXTitleAttribute as CFString, &itemTitle)
+                if let t = itemTitle as? String, t == "Paste" || t == "粘贴" {
+                    let result = AXUIElementPerformAction(item, kAXPressAction as CFString)
+                    DebugLog.log(.pipeline, "AX menu Paste press: \(result == .success ? "ok" : "failed")")
+                    return result == .success
+                }
+            }
+        }
+
+        return false
+    }
+
+    /// Fallback: simulate Cmd+V via CGEvent.
+    private static func simulatePasteViaCGEvent() {
         let source = CGEventSource(stateID: .combinedSessionState)
 
-        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true)
-        keyDown?.flags = flags
-        keyDown?.post(tap: .cghidEventTap)
+        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true)
+        keyDown?.flags = .maskCommand
+        keyDown?.post(tap: .cgSessionEventTap)
 
-        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
-        keyUp?.flags = flags
-        keyUp?.post(tap: .cghidEventTap)
+        usleep(50_000)
+
+        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false)
+        keyUp?.flags = .maskCommand
+        keyUp?.post(tap: .cgSessionEventTap)
     }
 }

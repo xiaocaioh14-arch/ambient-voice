@@ -1,0 +1,209 @@
+<div style="background:#fff; padding:30px 24px;">
+
+<h1 style="font-size:22px; font-weight:700; color:#1a1a1a; text-align:center; margin-bottom:8px; line-height:1.4" align="center">语音输入的终极形态：<br>三层纠错让它越用越懂你</h1>
+<div style="text-align:center; color:#888; font-size:14px; margin-bottom:30px; padding-bottom:20px; border-bottom:1px solid #eee" align="center">一个数据永远不出设备的 AI 语音输入系统是怎么炼成的</div>
+
+<div style="margin: 24px 0; text-align: center;">
+  <img src="img-cover.png" alt="Ambient Voice 封面" style="width: 100%;">
+</div>
+
+<p style="margin:12px 0; text-align:justify" align="justify">用语音输入写过东西的人都知道那种抓狂——</p>
+
+<p style="margin:12px 0; text-align:justify" align="justify">你说"帮我设置一个 <strong style="color:#1a1a1a">cron</strong>"，它给你打成"帮我设置一个 <strong style="color:#1a1a1a">crown</strong>"；你说"广州<strong style="color:#1a1a1a">有孚</strong>机房"，它听成"广州<strong style="color:#1a1a1a">有福</strong>机房"；你说"<strong style="color:#1a1a1a">fallback</strong> 方案"，出来的是"<strong style="color:#1a1a1a">for back</strong> 方案"。</p>
+
+<p style="margin:12px 0; text-align:justify" align="justify">每次手动改完，你心里都在想：<span style="background:#d4f5e0; padding:2px 4px; font-weight:600">它就不能记住吗？我已经改过很多次了。</span></p>
+
+<p style="margin:12px 0; text-align:justify" align="justify">这就是我做 Ambient Voice 这个项目的起点。我不想做一个"一次性很准"的语音识别工具，而是想做一个<strong style="color:#1a1a1a">会从你的修改中学习、越用越准</strong>的语音输入系统。</p>
+
+<h2 style="font-size:18px; font-weight:700; color:#1a1a1a; margin-top:36px; margin-bottom:16px; padding-left:12px; border-left:4px solid #07c160">核心思路：不追求一次完美，而是建立闭环</h2>
+
+<p style="margin:12px 0; text-align:justify" align="justify">语音识别引擎（Apple SpeechAnalyzer）的出错是不可避免的——同音词、专业术语、上下文歧义，总会有搞不定的情况。</p>
+
+<p style="margin:12px 0; text-align:justify" align="justify">所以我换了个思路：<strong style="color:#1a1a1a">与其押注单一模型的准确率，不如建立一个能从错误中学习的系统。</strong></p>
+
+<p style="margin:12px 0; text-align:justify" align="justify">Ambient Voice 的答案是一个三层纠错架构，每一层解决不同类型的问题，且计算开销递增：</p>
+
+<div style="margin: 24px 0; text-align: center;">
+  <img src="img-pipeline.png" alt="三层纠错管线架构" style="width: 100%; border: 1px solid #eee;">
+</div>
+
+<div style="background:#fff; border:1px solid #e8e8e8; padding:20px 24px; margin:16px 0">
+  <span style="display:inline-block; font-size:12px; font-weight:700; color:#fff; padding:3px 10px; margin-bottom:10px; background:#07c160">L1</span>
+  <div style="font-size:17px; font-weight:700; color:#1a1a1a; margin-bottom:4px">确定性纠错</div>
+  <div style="font-size:13px; color:#999; margin-bottom:10px">延迟：0ms · 纯逻辑运算</div>
+  <div style="font-size:15px; color:#555; line-height:1.7">处理已知的、重复出现的错误。靠的是你之前改过的纠错记录 + 当前屏幕上的关键词。</div>
+</div>
+
+<div style="text-align:center; font-size:24px; color:#ccc; margin:8px 0" align="center">↓</div>
+
+<div style="background:#fff; border:1px solid #e8e8e8; padding:20px 24px; margin:16px 0">
+  <span style="display:inline-block; font-size:12px; font-weight:700; color:#fff; padding:3px 10px; margin-bottom:10px; background:#1989fa">L2</span>
+  <div style="font-size:17px; font-weight:700; color:#1a1a1a; margin-bottom:4px">模型润色</div>
+  <div style="font-size:13px; color:#999; margin-bottom:10px">延迟：~1s · 本地 0.6B 模型</div>
+  <div style="font-size:15px; color:#555; line-height:1.7">处理未知的、需要语义理解的错误。只对低置信度的片段动手，高置信度的词永远不经过模型。</div>
+</div>
+
+<div style="text-align:center; font-size:24px; color:#ccc; margin:8px 0" align="center">↓</div>
+
+<div style="background:#fff; border:1px solid #e8e8e8; padding:20px 24px; margin:16px 0">
+  <span style="display:inline-block; font-size:12px; font-weight:700; color:#fff; padding:3px 10px; margin-bottom:10px; background:#ff976a">L3</span>
+  <div style="font-size:17px; font-weight:700; color:#1a1a1a; margin-bottom:4px">纠错捕获</div>
+  <div style="font-size:13px; color:#999; margin-bottom:10px">延迟：0ms · 被动监听</div>
+  <div style="font-size:15px; color:#555; line-height:1.7">静默观察你的每一次手动修改，记录下"识别错了什么、你改成了什么"，供 L1 和 L2 学习。</div>
+</div>
+
+<h2 style="font-size:18px; font-weight:700; color:#1a1a1a; margin-top:36px; margin-bottom:16px; padding-left:12px; border-left:4px solid #07c160">L1：你改过的，它下次就知道</h2>
+
+<p style="margin:12px 0; text-align:justify" align="justify">Apple 的语音引擎其实比你想象的"聪明一点"——它不只给一个识别结果，还会附带<strong style="color:#1a1a1a">置信度</strong>（它有多确定）和<strong style="color:#1a1a1a">候选列表</strong>（其他可能的结果）。</p>
+
+<p style="margin:12px 0; text-align:justify" align="justify">L1 的逻辑非常朴素：</p>
+
+<div style="background:#f8f9fa; border-left:4px solid #07c160; padding:16px 20px; margin:20px 0;  font-size:15px; color:#555; line-height:1.7">
+  <p style="margin:6px 0; text-align:justify" align="justify">置信度高？→ 不动它，绝对不动。</p>
+  <p style="margin:6px 0; text-align:justify" align="justify">置信度低？→ 去翻你的纠错记录和屏幕上的关键词，看看候选列表里有没有匹配的。有就换，没有就保留原样。</p>
+</div>
+
+<div style="background:#fafafa; padding:14px 18px; margin:14px 0; font-size:14px; color:#666; border:1px dashed #ddd">
+  <div style="font-size:12px; color:#999; margin-bottom:6px">💡 举个例子</div>
+  <p style="margin:12px 0; text-align:justify" align="justify">屏幕上有 <code style='background:#e8f5e9; padding:2px 6px; font-size:13px; color:#2d6a4f'>fallback</code> 这个词，语音识别出来是 <code style='background:#e8f5e9; padding:2px 6px; font-size:13px; color:#2d6a4f'>for back</code>（置信度低），候选列表里恰好有 <code style='background:#e8f5e9; padding:2px 6px; font-size:13px; color:#2d6a4f'>fallback</code> → L1 直接替换。</p>
+</div>
+
+<div style="background:#fff3e0; border-left:4px solid #ff976a; padding:14px 18px; margin:16px 0;  font-size:15px">
+  <strong style="color:#e65100">核心原则：不确定时不改。</strong> 错误的"纠正"比不纠正更糟糕。宁可留着让你手动改一次——L3 会记住这次修改，下次 L1 就知道怎么改了。
+</div>
+
+<h2 style="font-size:18px; font-weight:700; color:#1a1a1a; margin-top:36px; margin-bottom:16px; padding-left:12px; border-left:4px solid #07c160">L2：让 0.6B 小模型做一件事</h2>
+
+<p style="margin:12px 0; text-align:justify" align="justify">L1 能处理"见过的错误"，但遇到<strong style="color:#1a1a1a">从未出现过的新错误</strong>怎么办？这就需要模型上场了。</p>
+
+<p style="margin:12px 0; text-align:justify" align="justify">但我没有选择调用云端大模型，而是在本地跑一个 0.6B 参数的小模型（Qwen3-0.6B）。</p>
+
+<table style="width:100%; border-collapse:collapse; margin:16px 0; font-size:14px" width="100%">
+  <tr>
+    <th style="background:#f0faf4; padding:10px 14px; text-align:left; font-weight:600; color:#333; border-bottom:2px solid #07c160" align="left"></th>
+    <th style="background:#f0faf4; padding:10px 14px; text-align:left; font-weight:600; color:#333; border-bottom:2px solid #07c160" align="left">云端 API</th>
+    <th style="background:#f0faf4; padding:10px 14px; text-align:left; font-weight:600; color:#333; border-bottom:2px solid #07c160" align="left">本地 0.6B</th>
+  </tr>
+  <tr>
+    <td style="padding:10px 14px; border-bottom:1px solid #eee; color:#555"><strong style="color:#1a1a1a">延迟</strong></td>
+    <td style="padding:10px 14px; border-bottom:1px solid #eee; color:#555">1-3 秒</td>
+    <td style="padding:10px 14px; border-bottom:1px solid #eee; color:#555">~1 秒</td>
+  </tr>
+  <tr>
+    <td style="padding:10px 14px; border-bottom:1px solid #eee; color:#555"><strong style="color:#1a1a1a">隐私</strong></td>
+    <td style="padding:10px 14px; border-bottom:1px solid #eee; color:#555">数据上传云端</td>
+    <td style="padding:10px 14px; border-bottom:1px solid #eee; color:#555">数据不出设备</td>
+  </tr>
+  <tr>
+    <td style="padding:10px 14px; border-bottom:1px solid #eee; color:#555"><strong style="color:#1a1a1a">费用</strong></td>
+    <td style="padding:10px 14px; border-bottom:1px solid #eee; color:#555">按量付费</td>
+    <td style="padding:10px 14px; border-bottom:1px solid #eee; color:#555">免费</td>
+  </tr>
+  <tr>
+    <td style="padding:10px 14px; border-bottom:1px solid #eee; color:#555"><strong style="color:#1a1a1a">离线</strong></td>
+    <td style="padding:10px 14px; border-bottom:1px solid #eee; color:#555">不可用</td>
+    <td style="padding:10px 14px; border-bottom:1px solid #eee; color:#555">可用</td>
+  </tr>
+</table>
+
+<p style="margin:12px 0; text-align:justify" align="justify">关键设计点：<span style="background:#d4f5e0; padding:2px 4px; font-weight:600">L2 不做全文润色，只处理低置信度的片段。</span></p>
+
+<div style="background:#fafafa; padding:14px 18px; margin:14px 0; font-size:14px; color:#666; border:1px dashed #ddd">
+  <div style="font-size:12px; color:#999; margin-bottom:6px">💡 举个例子</div>
+  <p style="margin:12px 0; text-align:justify" align="justify">一句话里大部分词置信度都在 0.8 以上，只有"<code style='background:#e8f5e9; padding:2px 6px; font-size:13px; color:#2d6a4f'>有福</code>"这个词置信度是 0.3。L2 只把这个词和它的前后文发给模型，模型返回"<code style='background:#e8f5e9; padding:2px 6px; font-size:13px; color:#2d6a4f'>有孚</code>"，然后拼回去。</p>
+  <p style="margin:12px 0; text-align:justify" align="justify">高置信度的词<strong style="color:#1a1a1a">永远不经过模型</strong>——零延迟、零风险。</p>
+</div>
+
+<p style="margin:12px 0; text-align:justify" align="justify">通用的 0.6B 模型还不够好，所以我的计划是：用你自己的纠错数据（L3 采集的），微调一个专用的 LoRA adapter。0.6B 的通用能力不行，但在"语音纠错"这个窄场景下，经过微调完全可以达到可用水平。</p>
+
+<h2 style="font-size:18px; font-weight:700; color:#1a1a1a; margin-top:36px; margin-bottom:16px; padding-left:12px; border-left:4px solid #07c160">L3：你无感的数据采集站</h2>
+
+<p style="margin:12px 0; text-align:justify" align="justify">L3 是整个系统的"暗线"——你感觉不到它的存在，但它是飞轮转起来的关键。</p>
+
+<p style="margin:12px 0; text-align:justify" align="justify">文本注入到当前 app 后，L3 开始静默监听。如果你对注入的文字做了修改然后提交，L3 就捕获"改之前"和"改之后"的差异，写入纠错数据库。</p>
+
+<div style="background:#fafafa; padding:14px 18px; margin:14px 0; font-size:14px; color:#666; border:1px dashed #ddd">
+  <div style="font-size:12px; color:#999; margin-bottom:6px">💡 举个例子</div>
+  <p style="margin:12px 0; text-align:justify" align="justify">Ambient Voice 注入：<code style='background:#e8f5e9; padding:2px 6px; font-size:13px; color:#2d6a4f'>你帮我设置一个crown</code></p>
+  <p style="margin:12px 0; text-align:justify" align="justify">你改为：<code style='background:#e8f5e9; padding:2px 6px; font-size:13px; color:#2d6a4f'>你帮我设置一个cron</code></p>
+  <p style="margin:12px 0; text-align:justify" align="justify">L3 记录下这个纠错对。当同样的错误出现 2 次以上，L1 下次就会自动替换。</p>
+</div>
+
+<p style="margin:12px 0; text-align:justify" align="justify">为了适配不同 app 的技术架构，L3 有两种捕获模式：</p>
+
+<p style="margin:12px 0; text-align:justify" align="justify"><strong style="color:#1a1a1a">AX Observer 模式</strong>——通过 macOS 辅助功能 API 实时追踪文本变化，覆盖 Telegram、Obsidian、Chrome 等标准 app。</p>
+
+<p style="margin:12px 0; text-align:justify" align="justify"><strong style="color:#1a1a1a">Edit-Detect 模式</strong>——对于辅助功能 API 不好使的 app（微信、终端、Claude），通过监听退格键和提交时快照来判断你是否做了修改。</p>
+
+<p style="margin:12px 0; text-align:justify" align="justify">系统会自动检测当前 app 适合哪种模式，你完全不需要操心。</p>
+
+<h2 style="font-size:18px; font-weight:700; color:#1a1a1a; margin-top:36px; margin-bottom:16px; padding-left:12px; border-left:4px solid #07c160">数据飞轮：越用越准的秘密</h2>
+
+<p style="margin:12px 0; text-align:justify" align="justify">三层不是各干各的——它们形成一个<strong style="color:#1a1a1a">正反馈循环</strong>：</p>
+
+<div style="margin: 24px 0; text-align: center;">
+  <img src="img-flywheel.png" alt="数据飞轮" style="width: 100%; max-width: 560px;">
+</div>
+
+<div style="background:#f0faf4; padding:24px; margin:24px 0">
+  <h3 style="font-size:16px; font-weight:600; color:#1a1a1a; margin-top:0; margin-bottom:12px">飞轮加速过程</h3>
+  <table style="width:100%; border-collapse:collapse; font-size:15px" width="100%">
+    <tr>
+      <td style="padding:8px 0; vertical-align:top; width:80px; font-weight:600; color:#07c160" width="80" valign="top">Day 1~7</td>
+      <td style="padding:8px 0; vertical-align:top; color:#555" valign="top">冷启动期。L1 只靠语音引擎自带的候选 + 屏幕关键词，纠错能力有限。</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 0; vertical-align:top; width:80px; font-weight:600; color:#07c160" width="80" valign="top">Day 7+</td>
+      <td style="padding:8px 0; vertical-align:top; color:#555" valign="top">规则积累。同一纠错出现 2 次以上，L1 开始自动替换，你能明显感觉到它"懂了"。</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 0; vertical-align:top; width:80px; font-weight:600; color:#07c160" width="80" valign="top">Day 30+</td>
+      <td style="padding:8px 0; vertical-align:top; color:#555" valign="top">积累到 500 条数据，可以微调专用 adapter，L2 上线处理从未见过的错误。</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 0; vertical-align:top; width:80px; font-weight:600; color:#07c160" width="80" valign="top">持续</td>
+      <td style="padding:8px 0; vertical-align:top; color:#555" valign="top">L3 继续采集 → L1 规则持续更新 → L2 定期重训。系统越来越懂你的用词习惯。</td>
+    </tr>
+  </table>
+</div>
+
+<p style="margin:12px 0; text-align:justify" align="justify">这就是为什么我说"<strong style="color:#1a1a1a">不追求一次完美，而是建立闭环</strong>"——完美是一个持续逼近的过程，而不是一个起点。</p>
+
+<h2 style="font-size:18px; font-weight:700; color:#1a1a1a; margin-top:36px; margin-bottom:16px; padding-left:12px; border-left:4px solid #07c160">隐私，是硬约束</h2>
+
+<p style="margin:12px 0; text-align:justify" align="justify">Ambient Voice 的定位是<strong style="color:#1a1a1a">私密的 AI 语音入口</strong>。你对着麦克风说的每一句话、每一次纠错记录，都只存在你自己的 Mac 上，不会上传到任何服务器。</p>
+
+<p style="margin:12px 0; text-align:justify" align="justify">这也是为什么要在本地跑 0.6B 模型而不是调云端 API——隐私不是一个"Nice to have"的功能，而是架构层面的硬约束。</p>
+
+<table style="width:100%; border-collapse:collapse; margin:20px 0" width="100%">
+  <tr>
+    <td style="width:33%; background:#f8f9fa; padding:16px 8px; text-align:center" width="33%" align="center">
+      <div style="font-size:24px; font-weight:700; color:#07c160">&lt;100ms</div>
+      <div style="font-size:12px; color:#999; margin-top:4px">端到端延迟</div>
+    </td>
+    <td style="width:33%; background:#f8f9fa; padding:16px 8px; text-align:center; border-left:4px solid #fff; border-right:4px solid #fff" width="33%" align="center">
+      <div style="font-size:24px; font-weight:700; color:#07c160">121MB</div>
+      <div style="font-size:12px; color:#999; margin-top:4px">模型内存占用</div>
+    </td>
+    <td style="width:33%; background:#f8f9fa; padding:16px 8px; text-align:center" width="33%" align="center">
+      <div style="font-size:24px; font-weight:700; color:#07c160">0</div>
+      <div style="font-size:12px; color:#999; margin-top:4px">数据上传量</div>
+    </td>
+  </tr>
+</table>
+
+<h2 style="font-size:18px; font-weight:700; color:#1a1a1a; margin-top:36px; margin-bottom:16px; padding-left:12px; border-left:4px solid #07c160">写在最后</h2>
+
+<p style="margin:12px 0; text-align:justify" align="justify">语音输入这件事，大家都在卷识别准确率。但我觉得方向不该是"一次识别就完美"——这在物理上很难做到，尤其是面对专业术语、方言、个人用语习惯的时候。</p>
+
+<p style="margin:12px 0; text-align:justify" align="justify"><strong style="color:#1a1a1a">更好的方向是：让系统能从你的每一次修改中学习。</strong></p>
+
+<p style="margin:12px 0; text-align:justify" align="justify">用了一周，它知道你总是把"crown"改成"cron"；用了一个月，它甚至能理解你的专业语境。这不是什么黑科技，只是把<strong style="color:#1a1a1a">用户行为作为训练信号</strong>的一个朴素想法，加上一个恰到好处的三层架构。</p>
+
+<p style="margin:12px 0; text-align:justify" align="justify">如果你也被语音输入折磨过，或者对"端侧 AI + 隐私优先"的产品思路感兴趣，欢迎交流。</p>
+
+<div style="text-align:center; color:#bbb; font-size:13px; margin-top:40px; padding-top:20px; border-top:1px solid #eee" align="center">
+  Ambient Voice — 一个越用越懂你的 macOS 语音输入系统
+</div>
+
+</div>

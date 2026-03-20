@@ -12,6 +12,7 @@ final class PolishClient: @unchecked Sendable {
         case local    // On-device llama.cpp
         case ollama   // Ollama HTTP API
         case openai   // OpenAI-compatible API
+        case anthropic // Anthropic Messages API
         case fmAdapter = "fm-adapter-api" // FM adapter endpoint
     }
 
@@ -20,6 +21,14 @@ final class PolishClient: @unchecked Sendable {
         let text: String
         let wordConfidences: [Float]
         let appBundleID: String
+        let screenKeywords: [String]
+
+        init(text: String, wordConfidences: [Float], appBundleID: String, screenKeywords: [String] = []) {
+            self.text = text
+            self.wordConfidences = wordConfidences
+            self.appBundleID = appBundleID
+            self.screenKeywords = screenKeywords
+        }
     }
 
     /// Result of a polish operation.
@@ -46,8 +55,9 @@ final class PolishClient: @unchecked Sendable {
     }
 
     /// Convenience initializer from full WEConfig.
-    convenience init(weConfig: WEConfig, localClient: LocalModelClient) {
-        self.init(config: weConfig.polish, adapters: weConfig.adapters, localClient: localClient)
+    convenience init?(weConfig: WEConfig, localClient: LocalModelClient) {
+        guard let polish = weConfig.polish else { return nil }
+        self.init(config: polish, adapters: weConfig.adapters, localClient: localClient)
     }
 
     // MARK: - Public API
@@ -71,6 +81,7 @@ final class PolishClient: @unchecked Sendable {
         case .local: backendType = .local
         case .ollama: backendType = .ollama
         case .openai: backendType = .openai
+        case .anthropic: backendType = .anthropic
         case .fmAdapterApi: backendType = .fmAdapter
         }
 
@@ -83,6 +94,8 @@ final class PolishClient: @unchecked Sendable {
                 polished = try await polishHTTP(request, style: .ollama)
             case .openai:
                 polished = try await polishHTTP(request, style: .openai)
+            case .anthropic:
+                polished = try await polishHTTP(request, style: .anthropic)
             case .fmAdapter:
                 polished = try await polishHTTP(request, style: .fmAdapter)
             }
@@ -110,14 +123,17 @@ final class PolishClient: @unchecked Sendable {
             throw LocalModelClient.ModelError.modelNotLoaded
         }
 
-        let prompt = buildPrompt(request.text)
+        let prompt = buildPrompt(request.text, screenKeywords: request.screenKeywords)
 
-        return try localClient.generate(
+        let raw = try localClient.generate(
             prompt: prompt,
             maxTokens: config.maxTokens,
             temperature: Float(config.temperature),
             timeout: config.timeout
         )
+        let cleaned = Self.cleanModelOutput(raw)
+        DebugLog.log(.pipeline, "L2 raw: \"\(raw.prefix(200))\" -> cleaned: \"\(cleaned)\"")
+        return cleaned
     }
 
     // MARK: - HTTP Backends
@@ -125,6 +141,7 @@ final class PolishClient: @unchecked Sendable {
     private enum HTTPStyle {
         case ollama
         case openai
+        case anthropic
         case fmAdapter
     }
 
@@ -139,6 +156,8 @@ final class PolishClient: @unchecked Sendable {
             body = try buildOllamaRequest(request)
         case .openai:
             body = try buildOpenAIRequest(request)
+        case .anthropic:
+            body = try buildAnthropicRequest(request)
         case .fmAdapter:
             body = try buildFMAdapterRequest(request)
         }
@@ -148,6 +167,17 @@ final class PolishClient: @unchecked Sendable {
         urlRequest.httpBody = body
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.timeoutInterval = config.timeout
+
+        // Style-specific auth headers.
+        if let apiKey = config.apiKey, !apiKey.isEmpty {
+            switch style {
+            case .anthropic:
+                urlRequest.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+                urlRequest.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            default:
+                urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
+        }
 
         let (data, response) = try await URLSession.shared.data(for: urlRequest)
 
@@ -162,14 +192,18 @@ final class PolishClient: @unchecked Sendable {
 
     // MARK: - Request Building
 
-    private func buildPrompt(_ text: String) -> String {
-        return "<|im_start|>system\n\(config.systemPrompt)<|im_end|>\n<|im_start|>user\n\(text)<|im_end|>\n<|im_start|>assistant\n"
+    private func buildPrompt(_ text: String, screenKeywords: [String] = []) -> String {
+        var systemPrompt = config.systemPrompt
+        if !screenKeywords.isEmpty {
+            systemPrompt += "\n屏幕上下文关键词: \(screenKeywords.joined(separator: ", "))"
+        }
+        return "<|im_start|>system\n\(systemPrompt)<|im_end|>\n<|im_start|>user\n\(text)<|im_end|>\n<|im_start|>assistant\n"
     }
 
     private func buildOllamaRequest(_ request: PolishRequest) throws -> Data {
         let payload: [String: Any] = [
             "model": "qwen3:0.6b",
-            "prompt": buildPrompt(request.text),
+            "prompt": buildPrompt(request.text, screenKeywords: request.screenKeywords),
             "stream": false,
             "options": [
                 "temperature": config.temperature,
@@ -180,14 +214,40 @@ final class PolishClient: @unchecked Sendable {
     }
 
     private func buildOpenAIRequest(_ request: PolishRequest) throws -> Data {
-        let payload: [String: Any] = [
+        var systemPrompt = config.systemPrompt
+        if !request.screenKeywords.isEmpty {
+            systemPrompt += "\n屏幕上下文关键词: \(request.screenKeywords.joined(separator: ", "))"
+        }
+        var payload: [String: Any] = [
             "messages": [
-                ["role": "system", "content": config.systemPrompt],
+                ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": request.text]
             ],
             "temperature": config.temperature,
             "max_tokens": config.maxTokens
         ]
+        if let model = config.model, !model.isEmpty {
+            payload["model"] = model
+        }
+        return try JSONSerialization.data(withJSONObject: payload)
+    }
+
+    private func buildAnthropicRequest(_ request: PolishRequest) throws -> Data {
+        var systemPrompt = config.systemPrompt
+        if !request.screenKeywords.isEmpty {
+            systemPrompt += "\n屏幕上下文关键词: \(request.screenKeywords.joined(separator: ", "))"
+        }
+        var payload: [String: Any] = [
+            "messages": [
+                ["role": "user", "content": request.text]
+            ],
+            "system": systemPrompt,
+            "max_tokens": config.maxTokens,
+            "temperature": config.temperature
+        ]
+        if let model = config.model, !model.isEmpty {
+            payload["model"] = model
+        }
         return try JSONSerialization.data(withJSONObject: payload)
     }
 
@@ -224,6 +284,13 @@ final class PolishClient: @unchecked Sendable {
                let content = message["content"] as? String {
                 return content.trimmingCharacters(in: .whitespacesAndNewlines)
             }
+        case .anthropic:
+            // Anthropic: {"content": [{"type": "text", "text": "..."}]}
+            if let content = json["content"] as? [[String: Any]],
+               let first = content.first,
+               let text = first["text"] as? String {
+                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
         case .fmAdapter:
             // FM adapter: {"text": "..."}
             if let text = json["text"] as? String {
@@ -232,6 +299,32 @@ final class PolishClient: @unchecked Sendable {
         }
 
         throw PolishError.invalidResponse
+    }
+
+    // MARK: - Output Cleaning
+
+    /// Strip Qwen3 thinking tags and degenerate output.
+    private static func cleanModelOutput(_ raw: String) -> String {
+        var text = raw
+
+        // Remove <think>...</think> block (Qwen3 thinking mode).
+        if let thinkEnd = text.range(of: "</think>") {
+            text = String(text[thinkEnd.upperBound...])
+        } else if text.hasPrefix("<think>") {
+            // Thinking block started but never closed (max_tokens hit) — discard all.
+            return ""
+        }
+
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Detect degenerate repetition (e.g. "!!!!!" or "。。。。。").
+        if text.count >= 4 {
+            let chars = Array(text)
+            let allSame = chars.allSatisfy { $0 == chars[0] }
+            if allSame { return "" }
+        }
+
+        return text
     }
 
     // MARK: - Helpers

@@ -14,6 +14,15 @@ struct AlternativeSwap {
     /// Minimum number of times a correction must appear in history before it is trusted.
     static let minimumHistoryCount = 2
 
+    /// Result of L1 correction, including per-word outputs for L2 alignment.
+    struct L1Result {
+        let text: String
+        /// Per-word L1 output aligned with the input words array.
+        /// For multi-word replacements, the first consumed word gets the replacement
+        /// and subsequent consumed words get empty strings.
+        let wordTexts: [String]
+    }
+
     // MARK: - Public API
 
     /// Apply deterministic corrections based on SA alternatives and correction history.
@@ -25,30 +34,74 @@ struct AlternativeSwap {
     ///   - rawText: The full raw transcription text.
     ///   - words: Word-level transcription results with confidence and alternatives.
     ///   - correctionHistory: Past correction entries from CorrectionStore.
-    /// - Returns: The corrected text string.
+    /// - Returns: L1Result with corrected text and per-word outputs.
     static func apply(
         rawText: String,
         words: [TranscribedWord],
-        correctionHistory: [CorrectionEntry]
-    ) -> String {
-        guard !words.isEmpty else { return rawText }
-
-        let correctionMap = buildCorrectionMap(from: correctionHistory)
-
-        // If no correction history, return original text unchanged.
-        guard !correctionMap.isEmpty else { return rawText }
-
-        var resultParts: [String] = []
-
-        for word in words {
-            if let replacement = findBestAlternative(for: word, correctionMap: correctionMap) {
-                resultParts.append(replacement)
-            } else {
-                resultParts.append(word.text)
-            }
+        correctionHistory: [CorrectionEntry],
+        contextKeywords: [String] = [],
+        replacements: [String: String] = [:]
+    ) -> L1Result {
+        guard !words.isEmpty else {
+            return L1Result(text: rawText, wordTexts: [])
         }
 
-        return resultParts.joined()
+        let correctionMap = buildCorrectionMap(from: correctionHistory)
+        let keywordSet = Set(contextKeywords.map { $0.lowercased() })
+
+        // Build case-insensitive replacement map from config.
+        let forceMap = Dictionary(uniqueKeysWithValues:
+            replacements.map { ($0.key.lowercased(), $0.value) }
+        )
+
+        // If no correction sources at all, return original text unchanged.
+        guard !correctionMap.isEmpty || !keywordSet.isEmpty || !forceMap.isEmpty else {
+            return L1Result(text: rawText, wordTexts: words.map(\.text))
+        }
+
+        // Pre-compute multi-char force replacement keys grouped by length (descending).
+        let maxForceLen = forceMap.keys.map(\.count).max() ?? 0
+
+        // Per-word L1 outputs, aligned with input words array.
+        var wordTexts = [String](repeating: "", count: words.count)
+        var i = 0
+
+        while i < words.count {
+            // Try multi-word sliding window for force replacements (longest match first).
+            var matched = false
+            if maxForceLen > 0 {
+                let maxWindow = min(maxForceLen, words.count - i)
+                for windowLen in stride(from: maxWindow, through: 1, by: -1) {
+                    let combined = words[i..<(i + windowLen)].map(\.text).joined().lowercased()
+                    if let forced = forceMap[combined] {
+                        wordTexts[i] = forced
+                        DebugLog.log(.pipeline, "L1 force: \"\(combined)\" → \"\(forced)\"")
+                        // Mark consumed words as empty.
+                        for j in (i + 1)..<(i + windowLen) {
+                            wordTexts[j] = ""
+                        }
+                        i += windowLen
+                        matched = true
+                        break
+                    }
+                }
+            }
+            if matched { continue }
+
+            let word = words[i]
+            // Single-word force replacement.
+            if let forced = forceMap[word.text.lowercased()] {
+                wordTexts[i] = forced
+                DebugLog.log(.pipeline, "L1 force: \"\(word.text)\" → \"\(forced)\"")
+            } else if let replacement = findBestAlternative(for: word, correctionMap: correctionMap, contextKeywords: keywordSet) {
+                wordTexts[i] = replacement
+            } else {
+                wordTexts[i] = word.text
+            }
+            i += 1
+        }
+
+        return L1Result(text: wordTexts.joined(), wordTexts: wordTexts)
     }
 
     // MARK: - Private Helpers
@@ -65,15 +118,22 @@ struct AlternativeSwap {
         var pairCounts: [String: [String: Int]] = [:]
 
         for entry in history {
-            let rawWords = tokenize(entry.rawText)
             let finalWords = tokenize(entry.userFinalText)
 
-            // Simple LCS-based diff to find word-level changes.
-            let diffs = wordLevelDiff(original: rawWords, corrected: finalWords)
-            for (original, corrected) in diffs {
-                let key = original.lowercased()
-                let val = corrected
-                pairCounts[key, default: [:]][val, default: 0] += 1
+            // Learn from SA raw text → user final (corrects speech recognition errors).
+            let rawWords = tokenize(entry.rawText)
+            let rawDiffs = wordLevelDiff(original: rawWords, corrected: finalWords)
+            for (original, corrected) in rawDiffs {
+                pairCounts[original.lowercased(), default: [:]][corrected, default: 0] += 1
+            }
+
+            // Also learn from inserted text → user final (corrects L1/L2 pipeline errors).
+            if entry.insertedText != entry.rawText {
+                let insertedWords = tokenize(entry.insertedText)
+                let pipelineDiffs = wordLevelDiff(original: insertedWords, corrected: finalWords)
+                for (original, corrected) in pipelineDiffs {
+                    pairCounts[original.lowercased(), default: [:]][corrected, default: 0] += 1
+                }
             }
         }
 
@@ -83,6 +143,7 @@ struct AlternativeSwap {
             if let (bestCorrection, count) = corrections.max(by: { $0.value < $1.value }),
                count >= minimumHistoryCount {
                 map[original] = bestCorrection
+                DebugLog.log(.correction, "Correction map: \"\(original)\" → \"\(bestCorrection)\" (count: \(count))")
             }
         }
 
@@ -100,7 +161,8 @@ struct AlternativeSwap {
     /// - Returns: The replacement string, or nil if no swap should be made.
     private static func findBestAlternative(
         for word: TranscribedWord,
-        correctionMap: [String: String]
+        correctionMap: [String: String],
+        contextKeywords: Set<String> = []
     ) -> String? {
         // Never touch high-confidence words.
         guard word.confidence < confidenceThreshold else { return nil }
@@ -109,6 +171,7 @@ struct AlternativeSwap {
 
         // Check if the primary word itself has a known correction.
         if let corrected = correctionMap[key] {
+            DebugLog.log(.pipeline, "L1 history: \"\(word.text)\" → \"\(corrected)\"")
             return corrected
         }
 
@@ -116,7 +179,19 @@ struct AlternativeSwap {
         for alt in word.alternatives {
             let altKey = alt.lowercased()
             if let corrected = correctionMap[altKey] {
+                DebugLog.log(.pipeline, "L1 history: \"\(alt)\" → \"\(corrected)\"")
                 return corrected
+            }
+        }
+
+        // Screen context: if a low-confidence word's alternative matches a screen keyword,
+        // prefer it over the primary transcription.
+        if !contextKeywords.isEmpty {
+            for alt in word.alternatives {
+                if contextKeywords.contains(alt.lowercased()) {
+                    DebugLog.log(.pipeline, "L1 context: \"\(word.text)\" → \"\(alt)\" (screen keyword)")
+                    return alt
+                }
             }
         }
 
@@ -183,11 +258,10 @@ struct AlternativeSwap {
         var oi = 0, ci = 0, li = 0
 
         while oi < original.count || ci < corrected.count {
-            if li < lcs.count {
-                // Collect words before the next LCS match.
-                var origChanged: [String] = []
-                var corrChanged: [String] = []
+            var origChanged: [String] = []
+            var corrChanged: [String] = []
 
+            if li < lcs.count {
                 while oi < original.count && original[oi] != lcs[li] {
                     origChanged.append(original[oi])
                     oi += 1
@@ -196,41 +270,34 @@ struct AlternativeSwap {
                     corrChanged.append(corrected[ci])
                     ci += 1
                 }
-
-                // Pair up changes 1:1 where possible.
-                let pairCount = min(origChanged.count, corrChanged.count)
-                for i in 0..<pairCount {
-                    if origChanged[i].lowercased() != corrChanged[i].lowercased() {
-                        diffs.append((origChanged[i], corrChanged[i]))
-                    }
-                }
-
                 // Skip the matching LCS element.
                 oi += 1
                 ci += 1
                 li += 1
             } else {
-                // After LCS is exhausted, remaining words are changes.
-                var origChanged: [String] = []
-                var corrChanged: [String] = []
+                while oi < original.count { origChanged.append(original[oi]); oi += 1 }
+                while ci < corrected.count { corrChanged.append(corrected[ci]); ci += 1 }
+            }
 
-                while oi < original.count {
-                    origChanged.append(original[oi])
-                    oi += 1
-                }
-                while ci < corrected.count {
-                    corrChanged.append(corrected[ci])
-                    ci += 1
-                }
+            guard !origChanged.isEmpty || !corrChanged.isEmpty else { continue }
 
-                let pairCount = min(origChanged.count, corrChanged.count)
-                for i in 0..<pairCount {
+            if origChanged.count == corrChanged.count {
+                // Equal length: pair 1:1.
+                for i in 0..<origChanged.count {
                     if origChanged[i].lowercased() != corrChanged[i].lowercased() {
                         diffs.append((origChanged[i], corrChanged[i]))
                     }
                 }
-                break
+            } else if !origChanged.isEmpty && !corrChanged.isEmpty {
+                // Unequal length: record as a joined segment pair.
+                let origJoined = origChanged.joined()
+                let corrJoined = corrChanged.joined()
+                if origJoined.lowercased() != corrJoined.lowercased() {
+                    diffs.append((origJoined, corrJoined))
+                }
             }
+
+            if li >= lcs.count && oi >= original.count && ci >= corrected.count { break }
         }
 
         return diffs

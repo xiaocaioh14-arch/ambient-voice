@@ -11,6 +11,13 @@ struct VoiceHistoryEntry: Codable, Sendable {
     let wordCount: Int
     let duration: TimeInterval
     let polished: Bool
+    let audioFilePath: String?
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID, timestamp, rawText, l1Text, polishedText
+        case appBundleID, appName, wordCount, duration, polished
+        case audioFilePath = "audio_file_path"
+    }
 }
 
 final class VoiceHistory: Sendable {

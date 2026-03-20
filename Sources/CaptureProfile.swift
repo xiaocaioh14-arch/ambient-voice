@@ -33,6 +33,8 @@ struct CaptureProfile: Codable, Sendable {
         CaptureProfile(bundleID: "com.apple.Terminal", submitSignal: .cmdEnter, captureTimeout: 30, enabled: true),
         // iTerm2: Cmd+Enter
         CaptureProfile(bundleID: "com.googlecode.iterm2", submitSignal: .cmdEnter, captureTimeout: 30, enabled: true),
+        // Ghostty: Enter (edit-detection mode handles capture via AX buffer)
+        CaptureProfile(bundleID: "com.mitchellh.ghostty", submitSignal: .enter, captureTimeout: 30, enabled: true),
         // WeChat: Enter submits messages
         CaptureProfile(bundleID: "com.tencent.xinWeChat", submitSignal: .enter, captureTimeout: 15, enabled: true),
         // Slack: Enter submits messages

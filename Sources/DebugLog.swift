@@ -12,13 +12,15 @@ final class DebugLog: Sendable {
     // MARK: - Types
 
     enum Category: String, Sendable {
-        case hotKey      = "WE:HotKey"
-        case voice       = "WE:Voice"
-        case correction  = "CorrectionCapture"
-        case pipeline    = "WE:Pipeline"
-        case model       = "WE:Model"
-        case config      = "WE:Config"
-        case permission  = "WE:Permission"
+        case hotKey         = "WE:HotKey"
+        case voice          = "WE:Voice"
+        case correction     = "CorrectionCapture"
+        case pipeline       = "WE:Pipeline"
+        case model          = "WE:Model"
+        case config         = "WE:Config"
+        case permission     = "WE:Permission"
+        case screenContext  = "WE:ScreenContext"
+        case meeting        = "WE:Meeting"
     }
 
     enum Level: Int, Sendable, Comparable {

@@ -37,14 +37,17 @@ let package = Package(
                 .linkedFramework("MetalKit"),
                 .linkedFramework("MetalPerformanceShaders"),
                 .unsafeFlags([
-                    "-Llibs/llama.cpp/build/src",
-                    "-Llibs/llama.cpp/build/ggml/src",
+                    "-L\(Context.packageDirectory)/libs/llama.cpp/build/src",
+                    "-L\(Context.packageDirectory)/libs/llama.cpp/build/ggml/src",
+                    "-L\(Context.packageDirectory)/libs/llama.cpp/build/ggml/src/ggml-blas",
+                    "-L\(Context.packageDirectory)/libs/llama.cpp/build/ggml/src/ggml-metal",
                     "-lllama",
                     "-lggml",
                     "-lggml-base",
                     "-lggml-metal",
                     "-lggml-cpu",
                     "-lggml-blas",
+                    "-lstdc++",
                 ])
             ]
         ),

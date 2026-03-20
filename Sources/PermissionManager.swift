@@ -10,6 +10,7 @@ final class PermissionManager: ObservableObject {
 
     @Published var accessibilityStatus: PermissionStatus = .notDetermined
     @Published var microphoneStatus: PermissionStatus = .notDetermined
+    @Published var screenRecordingStatus: PermissionStatus = .notDetermined
 
     var allGranted: Bool { accessibilityStatus == .granted && microphoneStatus == .granted }
 
@@ -18,6 +19,7 @@ final class PermissionManager: ObservableObject {
     func checkAll() {
         checkAccessibility()
         checkMicrophone()
+        checkScreenRecording()
     }
 
     func checkAccessibility() {
@@ -34,6 +36,21 @@ final class PermissionManager: ObservableObject {
             microphoneStatus = .notDetermined
         @unknown default:
             microphoneStatus = .notDetermined
+        }
+    }
+
+    func checkScreenRecording() {
+        screenRecordingStatus = CGPreflightScreenCaptureAccess() ? .granted : .denied
+    }
+
+    func requestScreenRecording() {
+        CGRequestScreenCaptureAccess()
+        checkScreenRecording()
+    }
+
+    func openScreenRecordingSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
         }
     }
 

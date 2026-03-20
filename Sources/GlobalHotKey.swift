@@ -6,6 +6,7 @@ final class GlobalHotKey: @unchecked Sendable {
     enum Event {
         case pressed
         case released
+        case doubleTap
     }
 
     var onEvent: ((Event) -> Void)?
@@ -17,6 +18,11 @@ final class GlobalHotKey: @unchecked Sendable {
     private let debounceInterval: TimeInterval = 0.2  // 200ms
     private var debounceTimer: DispatchSourceTimer?
     private var pendingStop = false
+
+    // Double-tap detection
+    private var lastTapReleaseTime: Date?
+    private let doubleTapInterval: TimeInterval = 0.4  // 400ms window
+    private var lastTapWasShort = false
 
     /// Device-dependent Right Command mask (NX_DEVICERCMDKEYMASK).
     private static let rightCommandDeviceMask: UInt64 = 0x10
@@ -64,6 +70,8 @@ final class GlobalHotKey: @unchecked Sendable {
         isPressed = false
         pressTimestamp = nil
         pendingStop = false
+        lastTapReleaseTime = nil
+        lastTapWasShort = false
     }
 
     // MARK: - Internal handling
@@ -104,12 +112,28 @@ final class GlobalHotKey: @unchecked Sendable {
             debounceTimer = nil
 
             if held >= debounceInterval {
-                // Was past debounce — fire release
+                // Was past debounce — fire release (normal push-to-talk)
                 DispatchQueue.main.async { [weak self] in
                     self?.onEvent?(.released)
                 }
+                lastTapWasShort = false
+            } else {
+                // Short tap (released before debounce) — check for double-tap
+                let now = Date()
+                if lastTapWasShort,
+                   let lastRelease = lastTapReleaseTime,
+                   now.timeIntervalSince(lastRelease) <= doubleTapInterval {
+                    // Double-tap detected!
+                    lastTapWasShort = false
+                    lastTapReleaseTime = nil
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onEvent?(.doubleTap)
+                    }
+                } else {
+                    lastTapWasShort = true
+                    lastTapReleaseTime = now
+                }
             }
-            // If released before debounce elapsed, neither pressed nor released fires — tap ignored.
             pressTimestamp = nil
         }
     }

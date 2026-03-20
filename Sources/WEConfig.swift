@@ -1,9 +1,14 @@
 import Foundation
 
 struct WEConfig: Codable, Sendable {
-    var polish: PolishConfig
+    var polish: PolishConfig?
     var adapters: [String: String]
+    var keywords: [String]?
+    var replacements: [String: String]?
     var downloads: DownloadConfig
+    var screenContext: ScreenContextConfig?
+    var meeting: MeetingConfig?
+    var distillation: DistillationConfig?
 
     // MARK: - Polish
 
@@ -15,6 +20,8 @@ struct WEConfig: Codable, Sendable {
         var maxTokens: Int
         var timeout: Double
         var endpoint: String?
+        var apiKey: String?
+        var model: String?
 
         enum CodingKeys: String, CodingKey {
             case enabled, type
@@ -22,6 +29,8 @@ struct WEConfig: Codable, Sendable {
             case temperature
             case maxTokens = "max_tokens"
             case timeout, endpoint
+            case apiKey = "api_key"
+            case model
         }
     }
 
@@ -29,6 +38,7 @@ struct WEConfig: Codable, Sendable {
         case local
         case ollama
         case openai
+        case anthropic
         case fmAdapterApi = "fm-adapter-api"
     }
 
@@ -45,18 +55,91 @@ struct WEConfig: Codable, Sendable {
         }
     }
 
+    // MARK: - Screen Context
+
+    struct ScreenContextConfig: Codable, Sendable {
+        var enabled: Bool
+        var maxKeywords: Int
+        var ocrTimeout: Double
+
+        enum CodingKeys: String, CodingKey {
+            case enabled
+            case maxKeywords = "max_keywords"
+            case ocrTimeout = "ocr_timeout"
+        }
+
+        static let `default` = ScreenContextConfig(
+            enabled: false,
+            maxKeywords: 20,
+            ocrTimeout: 2.0
+        )
+    }
+
+    // MARK: - Meeting
+
+    struct MeetingConfig: Codable, Sendable {
+        var enabled: Bool
+        var silenceThresholdMs: Int
+        var chunkDurationSec: Int
+        var panelOpacity: Double
+        var saveAudio: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case enabled
+            case silenceThresholdMs = "silence_threshold_ms"
+            case chunkDurationSec = "chunk_duration_sec"
+            case panelOpacity = "panel_opacity"
+            case saveAudio = "save_audio"
+        }
+
+        static let `default` = MeetingConfig(
+            enabled: true,
+            silenceThresholdMs: 1500,
+            chunkDurationSec: 300,
+            panelOpacity: 0.85,
+            saveAudio: true
+        )
+    }
+
+    // MARK: - Distillation
+
+    struct DistillationConfig: Codable, Sendable {
+        var saveAudio: Bool
+        var whisperEndpoint: String?
+        var geminiEndpoint: String?
+        var geminiApiKey: String?
+        var audioRetentionDays: Int
+
+        enum CodingKeys: String, CodingKey {
+            case saveAudio = "save_audio"
+            case whisperEndpoint = "whisper_endpoint"
+            case geminiEndpoint = "gemini_endpoint"
+            case geminiApiKey = "gemini_api_key"
+            case audioRetentionDays = "audio_retention_days"
+        }
+
+        static let `default` = DistillationConfig(
+            saveAudio: false,
+            whisperEndpoint: nil,
+            geminiEndpoint: nil,
+            geminiApiKey: nil,
+            audioRetentionDays: 30
+        )
+    }
+
+    // MARK: - Audio Constants
+
+    /// Shared audio format constants for meeting mode and distillation.
+    enum AudioConstants {
+        static let sampleRate: Double = 16000
+        static let channels: UInt32 = 1
+        static let bitsPerChannel: UInt32 = 16
+    }
+
     // MARK: - Defaults
 
     static let `default` = WEConfig(
-        polish: PolishConfig(
-            enabled: true,
-            type: .local,
-            systemPrompt: "口语转书面。只输出结果。",
-            temperature: 0,
-            maxTokens: 256,
-            timeout: 10,
-            endpoint: nil
-        ),
+        polish: nil,
         adapters: [
             "com.apple.Terminal": "coding.gguf",
             "com.tencent.xinWeChat": "chat.gguf"

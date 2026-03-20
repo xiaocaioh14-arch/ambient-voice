@@ -38,6 +38,9 @@ final class VoiceModule: WEModule {
 
     // MARK: - WEModule lifecycle
 
+    /// Optional meeting module reference for double-tap routing.
+    var meetingModule: MeetingModule?
+
     func activate() async throws {
         isActive = true
         hotKey.onEvent = { [weak self] event in
@@ -48,6 +51,8 @@ final class VoiceModule: WEModule {
                     self.onHotkeyPressed()
                 case .released:
                     self.onHotkeyReleased()
+                case .doubleTap:
+                    self.meetingModule?.toggle()
                 }
             }
         }
@@ -69,6 +74,10 @@ final class VoiceModule: WEModule {
     // MARK: - Hotkey handling
 
     /// Called when hotkey is pressed (after debounce).
+    /// Screen context captured concurrently with voice recording.
+    private var capturedScreenContext: ScreenContext?
+    private var screenCaptureTask: Task<Void, Never>?
+
     func onHotkeyPressed() {
         guard state == .idle else { return }
 
@@ -78,12 +87,38 @@ final class VoiceModule: WEModule {
 
         state = .preparing
         onStateChange?(.preparing)
+        capturedScreenContext = nil
+        screenCaptureTask = nil
+
+        let config = WEConfig.load()
 
         Task {
             do {
                 let voiceSession = VoiceSession()
+
+                // Enable audio saving for distillation if configured
+                if config.distillation?.saveAudio == true {
+                    voiceSession.saveAudio = true
+                }
+
                 self.session = voiceSession
+
+                // Inject config keywords immediately, start recording first.
+                // Screen OCR runs in parallel — its keywords are injected when ready.
+                voiceSession.contextualStrings = config.keywords ?? []
+
                 try await voiceSession.start()
+
+                // Screen capture runs in parallel after recording has started.
+                if let scConfig = config.screenContext, scConfig.enabled {
+                    self.screenCaptureTask?.cancel()
+                    self.screenCaptureTask = Task {
+                        let ctx = await ScreenContextProvider.capture(config: scConfig)
+                        await MainActor.run {
+                            self.capturedScreenContext = ctx
+                        }
+                    }
+                }
 
                 // Session is now recording — check if release arrived while preparing
                 if pendingStop {
@@ -126,7 +161,12 @@ final class VoiceModule: WEModule {
             return
         }
 
+        // Wait for screen capture to finish (if still running)
+        await screenCaptureTask?.value
+        screenCaptureTask = nil
+
         let result = await session.stop()
+        let audioPath = session.savedAudioPath
         self.session = nil
 
         guard !result.fullText.isEmpty, let app = pinnedApp else {
@@ -136,12 +176,18 @@ final class VoiceModule: WEModule {
         }
 
         // Pass to VoicePipeline for L1 -> L2 -> inject -> capture
-        await VoicePipeline.process(result: result, appIdentity: app)
+        await VoicePipeline.process(
+            result: result,
+            appIdentity: app,
+            screenContext: capturedScreenContext,
+            audioFilePath: audioPath
+        )
 
         DebugLog.log(.voice, "Pipeline complete for session")
         state = .idle
         onStateChange?(.idle)
         pinnedApp = nil
+        capturedScreenContext = nil
     }
 
     private func forceStop() async {

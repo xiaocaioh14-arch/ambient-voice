@@ -36,6 +36,7 @@ final class LocalModelClient: @unchecked Sendable {
 
     private var model: OpaquePointer?       // llama_model*
     private var defaultCtx: OpaquePointer?  // llama_context*
+    private var currentAdapter: OpaquePointer? // llama_adapter_lora*
     private var currentModelPath: String?
     private var currentAdapterPath: String?
 
@@ -73,7 +74,7 @@ final class LocalModelClient: @unchecked Sendable {
             throw ModelError.loadFailed("llama_model_load_from_file returned nil for \(path)")
         }
 
-        NSLog("[WE:localmodel] Loaded model: %@", filename)
+        DebugLog.log(.model, "Loaded model: \(filename)")
     }
 
     /// Apply a LoRA adapter to the currently loaded model.
@@ -92,23 +93,39 @@ final class LocalModelClient: @unchecked Sendable {
         }
 
         try queue.sync {
-            // Remove existing context before changing adapter.
+            // Remove existing context and adapter before changing.
             if let ctx = self.defaultCtx {
                 llama_free(ctx)
                 self.defaultCtx = nil
             }
+            if let oldAdapter = self.currentAdapter {
+                llama_adapter_lora_free(oldAdapter)
+                self.currentAdapter = nil
+            }
 
-            let result = llama_lora_adapter_set(model, llama_lora_adapter_init(model, path), 1.0)
-            guard result == 0 else {
+            guard let adapter = llama_adapter_lora_init(model, path) else {
                 self.createContext()
+                throw ModelError.loadFailed("Failed to load adapter: \(path)")
+            }
+
+            self.currentAdapter = adapter
+            self.createContext()
+
+            guard let ctx = self.defaultCtx else {
+                throw ModelError.loadFailed("Failed to create context after adapter load")
+            }
+
+            var adapters: [OpaquePointer?] = [adapter]
+            var scales: [Float] = [1.0]
+            let result = llama_set_adapters_lora(ctx, &adapters, 1, &scales)
+            guard result == 0 else {
                 throw ModelError.loadFailed("Failed to apply adapter: \(path)")
             }
 
             self.currentAdapterPath = path
-            self.createContext()
         }
 
-        NSLog("[WE:localmodel] Applied adapter: %@", filename)
+        DebugLog.log(.model, "Applied adapter: \(filename)")
     }
 
     /// Hot-switch adapter based on the target application's bundle ID.
@@ -128,7 +145,7 @@ final class LocalModelClient: @unchecked Sendable {
         do {
             try applyAdapter(filename: adapterFilename)
         } catch {
-            NSLog("[WE:localmodel] Failed to switch adapter for %@: %@", bundleID, "\(error)")
+            DebugLog.log(.model, "Failed to switch adapter for \(bundleID): \(error)", level: .error)
         }
     }
 
@@ -167,36 +184,53 @@ final class LocalModelClient: @unchecked Sendable {
 
         return try queue.sync {
             // Tokenize input.
+            let vocab = llama_model_get_vocab(model)
             let promptBytes = Array(prompt.utf8)
             let maxInputTokens = promptBytes.count + 1
             var tokens = [llama_token](repeating: 0, count: maxInputTokens)
-            let nTokens = llama_tokenize(model, promptBytes, Int32(promptBytes.count),
+            let nTokens = llama_tokenize(vocab, promptBytes, Int32(promptBytes.count),
                                           &tokens, Int32(maxInputTokens), true, true)
             guard nTokens > 0 else {
                 throw ModelError.inferenceFailed("Tokenization failed")
             }
             tokens = Array(tokens.prefix(Int(nTokens)))
+            let promptStart = Date()
 
             // Clear KV cache.
-            llama_kv_cache_clear(ctx)
+            llama_memory_clear(llama_get_memory(ctx), true)
 
             // Create batch and evaluate prompt tokens.
             var batch = llama_batch_init(Int32(tokens.count + maxTokens), 0, 1)
             defer { llama_batch_free(batch) }
 
             for (i, token) in tokens.enumerated() {
-                llama_batch_add(&batch, token, Int32(i), [0], false)
+                let idx = Int(batch.n_tokens)
+                batch.token[idx] = token
+                batch.pos[idx] = Int32(i)
+                batch.n_seq_id[idx] = 1
+                batch.seq_id[idx]![0] = 0
+                batch.logits[idx] = 0
+                batch.n_tokens += 1
             }
             batch.logits[Int(batch.n_tokens - 1)] = 1 // Enable logits for last token
 
             guard llama_decode(ctx, batch) == 0 else {
                 throw ModelError.inferenceFailed("Initial decode failed")
             }
+            let promptMs = Int(Date().timeIntervalSince(promptStart) * 1000)
 
             // Autoregressive generation.
-            let vocab = llama_model_get_vocab(model)
             var outputTokens: [llama_token] = []
             var curPos = batch.n_tokens
+
+            // Create sampler once, reuse for all tokens.
+            let sampler: UnsafeMutablePointer<llama_sampler>
+            if temperature <= 0 {
+                sampler = llama_sampler_init_greedy()
+            } else {
+                sampler = llama_sampler_init_temp(temperature)
+            }
+            defer { llama_sampler_free(sampler) }
 
             for _ in 0..<maxTokens {
                 // Check timeout.
@@ -221,10 +255,9 @@ final class LocalModelClient: @unchecked Sendable {
 
                 let nextToken: llama_token
                 if temperature <= 0 {
-                    // Greedy sampling.
-                    nextToken = llama_sampler_sample(llama_sampler_init_greedy(), ctx, -1)
+                    nextToken = llama_sampler_sample(sampler, ctx, -1)
                 } else {
-                    llama_sampler_apply(llama_sampler_init_temp(temperature), &candidatesP)
+                    llama_sampler_apply(sampler, &candidatesP)
                     nextToken = candidatesP.data[0].id
                 }
 
@@ -236,8 +269,14 @@ final class LocalModelClient: @unchecked Sendable {
                 outputTokens.append(nextToken)
 
                 // Prepare next batch.
-                llama_batch_clear(&batch)
-                llama_batch_add(&batch, nextToken, curPos, [0], true)
+                batch.n_tokens = 0
+                let idx = 0
+                batch.token[idx] = nextToken
+                batch.pos[idx] = curPos
+                batch.n_seq_id[idx] = 1
+                batch.seq_id[idx]![0] = 0
+                batch.logits[idx] = 1
+                batch.n_tokens = 1
                 curPos += 1
 
                 guard llama_decode(ctx, batch) == 0 else {
@@ -246,6 +285,10 @@ final class LocalModelClient: @unchecked Sendable {
             }
 
             // Detokenize output.
+            let totalMs = Int(Date().timeIntervalSince(promptStart) * 1000)
+            let genTokens = outputTokens.count
+            let tps = totalMs > 0 ? Double(genTokens) / (Double(totalMs) / 1000.0) : 0
+            DebugLog.log(.model, "Inference: prompt=\(Int(nTokens))tok/\(promptMs)ms gen=\(genTokens)tok/\(totalMs - promptMs)ms total=\(totalMs)ms (\(String(format: "%.1f", tps)) tok/s)")
             return detokenize(tokens: outputTokens, vocab: vocab)
         }
     }
@@ -266,6 +309,10 @@ final class LocalModelClient: @unchecked Sendable {
         if let ctx = defaultCtx {
             llama_free(ctx)
             defaultCtx = nil
+        }
+        if let adapter = currentAdapter {
+            llama_adapter_lora_free(adapter)
+            currentAdapter = nil
         }
         if let mdl = model {
             llama_model_free(mdl)
