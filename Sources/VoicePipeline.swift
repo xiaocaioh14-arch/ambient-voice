@@ -57,11 +57,13 @@ enum VoicePipeline {
 
         let contextKeywords = screenContext?.keywords ?? []
         if !contextKeywords.isEmpty {
+            DebugLog.log(.pipeline, "Screen keywords: \(contextKeywords.prefix(10).joined(separator: ", "))")
             DebugLog.log(.pipeline, "Screen context: \(contextKeywords.count) keywords")
         }
 
         // Step 1: L1 deterministic correction
         let correctionHistory = CorrectionStore.shared.loadHistory()
+        DebugLog.log(.pipeline, "L1 sources: \(correctionHistory.count) history, \(replacements.count) replacements, \(contextKeywords.count) keywords")
         let l1Result = AlternativeSwap.apply(
             rawText: result.fullText,
             words: result.words,

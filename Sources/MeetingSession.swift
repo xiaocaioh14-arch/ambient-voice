@@ -18,6 +18,7 @@ final class MeetingSession: @unchecked Sendable {
     // Audio capture via AVCaptureSession (handles Bluetooth correctly)
     private var captureSession: AVCaptureSession?
     private var audioOutput: AVCaptureAudioDataOutput?
+    private var bufferDelegate: AudioBufferDelegate?  // Strong ref — setSampleBufferDelegate is weak!
     private let captureQueue = DispatchQueue(label: "we.meeting.capture", qos: .userInitiated)
 
     // Speech recognition
@@ -84,10 +85,9 @@ final class MeetingSession: @unchecked Sendable {
         }
 
         let output = AVCaptureAudioDataOutput()
-        output.setSampleBufferDelegate(
-            AudioBufferDelegate(session: self),
-            queue: captureQueue
-        )
+        let delegate = AudioBufferDelegate(session: self)
+        self.bufferDelegate = delegate  // Must retain — setSampleBufferDelegate is weak
+        output.setSampleBufferDelegate(delegate, queue: captureQueue)
         if session.canAddOutput(output) {
             session.addOutput(output)
         }
@@ -107,8 +107,8 @@ final class MeetingSession: @unchecked Sendable {
         lastSpeechTime = Date()
         recognitionStartTime = Date()
 
-        // Start silence monitoring timer
-        startSilenceTimer()
+        // Start silence monitoring timer on main thread (Timer requires active RunLoop)
+        DispatchQueue.main.async { self.startSilenceTimer() }
 
         DebugLog.log(.meeting, "Meeting \(meeting.id) started (AVCaptureSession)")
     }
@@ -122,6 +122,7 @@ final class MeetingSession: @unchecked Sendable {
         captureSession?.stopRunning()
         captureSession = nil
         audioOutput = nil
+        bufferDelegate = nil
 
         recognitionRequest?.endAudio()
         recognitionTask?.cancel()
@@ -157,19 +158,29 @@ final class MeetingSession: @unchecked Sendable {
     private func writeAudioChunk(_ sampleBuffer: CMSampleBuffer) {
         // Lazy init audio format and file from first buffer
         if audioFormat == nil {
-            guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
+            guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+                DebugLog.log(.meeting, "No format description in sample buffer", level: .warning)
+                return
+            }
             let format = AVAudioFormat(cmAudioFormatDescription: formatDesc)
-            self.audioFormat = format
+            DebugLog.log(.meeting, "Audio format: \(format.sampleRate)Hz, \(format.channelCount)ch, \(format.commonFormat.rawValue)")
             do {
                 try startNewAudioChunk(format: format)
+                // Only set audioFormat AFTER file creation succeeds
+                self.audioFormat = format
             } catch {
-                DebugLog.log(.meeting, "Failed to start audio chunk: \(error)", level: .warning)
+                DebugLog.log(.meeting, "Failed to start audio chunk: \(error)", level: .error)
+                return
             }
         }
 
         // Convert CMSampleBuffer to AVAudioPCMBuffer and write
         guard let pcmBuffer = pcmBuffer(from: sampleBuffer) else { return }
-        try? audioFile?.write(from: pcmBuffer)
+        do {
+            try audioFile?.write(from: pcmBuffer)
+        } catch {
+            DebugLog.log(.meeting, "Failed to write audio buffer: \(error)", level: .warning)
+        }
 
         // Rotate chunk if needed
         if let start = chunkStartTime,
@@ -188,16 +199,22 @@ final class MeetingSession: @unchecked Sendable {
         let format = AVAudioFormat(cmAudioFormatDescription: formatDesc)
 
         let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard frameCount > 0 else { return nil }
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)) else { return nil }
         buffer.frameLength = AVAudioFrameCount(frameCount)
 
-        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return nil }
-        var length = 0
-        var dataPointer: UnsafeMutablePointer<Int8>?
-        CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length, dataPointerOut: &dataPointer)
+        // Use Apple's API to copy PCM data correctly regardless of sample format (int16/float32)
+        let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer,
+            at: 0,
+            frameCount: Int32(frameCount),
+            into: buffer.mutableAudioBufferList
+        )
 
-        guard let data = dataPointer, let channelData = buffer.floatChannelData else { return nil }
-        memcpy(channelData[0], data, length)
+        guard status == noErr else {
+            DebugLog.log(.meeting, "CMSampleBufferCopyPCMDataIntoAudioBufferList failed: \(status)", level: .warning)
+            return nil
+        }
 
         return buffer
     }
@@ -217,21 +234,26 @@ final class MeetingSession: @unchecked Sendable {
 
             if let result {
                 let text = result.bestTranscription.formattedString
+                let isFinal = result.isFinal
                 if !text.isEmpty {
                     self.lastSpeechTime = Date()
                     let segment = MeetingSegment(
                         timestamp: self.meeting.duration,
                         text: text,
                         speakerIndex: self.speakerTracker.currentSpeakerIndex,
-                        isFinal: result.isFinal
+                        isFinal: isFinal
                     )
-                    if result.isFinal {
-                        self.meeting.segments.append(segment)
-                    }
                     DispatchQueue.main.async {
+                        if isFinal {
+                            self.meeting.segments.append(segment)
+                        }
                         self.onSegment?(segment)
                     }
                 }
+            }
+
+            if let error {
+                DebugLog.log(.meeting, "Recognition error: \(error.localizedDescription)", level: .warning)
             }
 
             if error != nil || (result?.isFinal ?? false) {

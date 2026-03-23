@@ -5,3 +5,4 @@ libs/llama.cpp/
 *.a
 DerivedData/
 .DS_Store
+build/

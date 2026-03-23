@@ -29,6 +29,21 @@ final class MeetingModule: WEModule {
     func activate() async throws {
         isActive = true
         DebugLog.log(.meeting, "MeetingModule activated")
+
+        // Auto-transcribe any meetings that have audio but no transcript
+        Task {
+            let pending = MeetingExporter.pendingMeetings()
+            if !pending.isEmpty {
+                DebugLog.log(.meeting, "Found \(pending.count) meetings pending offline transcription")
+                for id in pending {
+                    DebugLog.log(.meeting, "Starting offline transcription for \(id)")
+                    let path = await MeetingExporter.transcribeOffline(meetingID: id)
+                    if let path {
+                        DebugLog.log(.meeting, "Offline transcript ready: \(path)")
+                    }
+                }
+            }
+        }
     }
 
     func deactivate() async {

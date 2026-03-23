@@ -12,7 +12,7 @@ struct AlternativeSwap {
     static let confidenceThreshold: Float = 0.5
 
     /// Minimum number of times a correction must appear in history before it is trusted.
-    static let minimumHistoryCount = 2
+    static let minimumHistoryCount = 1
 
     /// Result of L1 correction, including per-word outputs for L2 alignment.
     struct L1Result {
@@ -43,6 +43,7 @@ struct AlternativeSwap {
         replacements: [String: String] = [:]
     ) -> L1Result {
         guard !words.isEmpty else {
+            DebugLog.log(.pipeline, "L1 skipped: no words", level: .debug)
             return L1Result(text: rawText, wordTexts: [])
         }
 
@@ -56,6 +57,7 @@ struct AlternativeSwap {
 
         // If no correction sources at all, return original text unchanged.
         guard !correctionMap.isEmpty || !keywordSet.isEmpty || !forceMap.isEmpty else {
+            DebugLog.log(.pipeline, "L1 pass-through: no correction sources", level: .debug)
             return L1Result(text: rawText, wordTexts: words.map(\.text))
         }
 
@@ -76,7 +78,6 @@ struct AlternativeSwap {
                     if let forced = forceMap[combined] {
                         wordTexts[i] = forced
                         DebugLog.log(.pipeline, "L1 force: \"\(combined)\" → \"\(forced)\"")
-                        // Mark consumed words as empty.
                         for j in (i + 1)..<(i + windowLen) {
                             wordTexts[j] = ""
                         }
@@ -89,10 +90,16 @@ struct AlternativeSwap {
             if matched { continue }
 
             let word = words[i]
-            // Single-word force replacement.
+            // Single-word: try exact match first, then substring match for force replacements.
             if let forced = forceMap[word.text.lowercased()] {
                 wordTexts[i] = forced
                 DebugLog.log(.pipeline, "L1 force: \"\(word.text)\" → \"\(forced)\"")
+            } else if let (from, to) = substringForceMatch(word.text, forceMap: forceMap) {
+                // SA merged the key with surrounding chars (e.g. "户口的" contains "户口")
+                let replaced = word.text.lowercased().replacingOccurrences(of: from, with: to)
+                // Restore original casing for non-replaced parts
+                wordTexts[i] = restoreCase(original: word.text, lowercased: replaced, replacedFrom: from, replacedTo: to)
+                DebugLog.log(.pipeline, "L1 force-substr: \"\(word.text)\" → \"\(wordTexts[i])\" (matched \"\(from)\"→\"\(to)\")")
             } else if let replacement = findBestAlternative(for: word, correctionMap: correctionMap, contextKeywords: keywordSet) {
                 wordTexts[i] = replacement
             } else {
@@ -101,7 +108,79 @@ struct AlternativeSwap {
             i += 1
         }
 
-        return L1Result(text: wordTexts.joined(), wordTexts: wordTexts)
+        // Rebuild text preserving original spacing from rawText.
+        let finalText = rebuildWithSpacing(rawText: rawText, words: words, wordTexts: wordTexts)
+        return L1Result(text: finalText, wordTexts: wordTexts)
+    }
+
+    // MARK: - Force Replacement Helpers
+
+    /// Substring match: check if any forceMap key is a substring of the word.
+    /// Returns the matched (key, value) pair, or nil.
+    private static func substringForceMatch(
+        _ wordText: String,
+        forceMap: [String: String]
+    ) -> (String, String)? {
+        let lower = wordText.lowercased()
+        // Prefer longer keys first to avoid partial matches.
+        for (key, value) in forceMap.sorted(by: { $0.key.count > $1.key.count }) {
+            if lower.contains(key) && lower != key {
+                return (key, value)
+            }
+        }
+        return nil
+    }
+
+    /// Restore original casing for the non-replaced parts of the word.
+    private static func restoreCase(
+        original: String,
+        lowercased: String,
+        replacedFrom: String,
+        replacedTo: String
+    ) -> String {
+        // Find where the replacement happened in the lowercased string.
+        guard let range = original.lowercased().range(of: replacedFrom) else {
+            return lowercased
+        }
+        let before = String(original[original.startIndex..<range.lowerBound])
+        let after = String(original[range.upperBound...])
+        return before + replacedTo + after
+    }
+
+    /// Rebuild final text preserving the spacing pattern from rawText.
+    /// Scans rawText to detect spaces between word boundaries, then inserts
+    /// the same spaces between the corrected wordTexts.
+    private static func rebuildWithSpacing(
+        rawText: String,
+        words: [TranscribedWord],
+        wordTexts: [String]
+    ) -> String {
+        guard words.count > 1 else { return wordTexts.joined() }
+
+        // Build a map of which word boundaries had spaces in the original rawText.
+        // Strategy: walk rawText character by character, matching word texts sequentially.
+        var hasSpaceAfter = [Bool](repeating: false, count: words.count)
+        var searchPos = rawText.startIndex
+        for (idx, word) in words.enumerated() {
+            guard let foundRange = rawText.range(of: word.text, range: searchPos..<rawText.endIndex) else {
+                continue
+            }
+            // Check if there's whitespace between end of this word and start of next word's text.
+            let afterWord = foundRange.upperBound
+            if afterWord < rawText.endIndex && rawText[afterWord].isWhitespace {
+                hasSpaceAfter[idx] = true
+            }
+            searchPos = foundRange.upperBound
+        }
+
+        var result = ""
+        for (idx, wordText) in wordTexts.enumerated() {
+            result += wordText
+            if idx < words.count - 1 && hasSpaceAfter[idx] {
+                result += " "
+            }
+        }
+        return result
     }
 
     // MARK: - Private Helpers
@@ -138,10 +217,14 @@ struct AlternativeSwap {
         }
 
         // Only include mappings that appear frequently enough.
+        // Single CJK characters need higher threshold to avoid over-fitting
+        // (e.g. "你"→"功能" from one truncated correction would corrupt all inputs).
         var map: [String: String] = [:]
         for (original, corrections) in pairCounts {
-            if let (bestCorrection, count) = corrections.max(by: { $0.value < $1.value }),
-               count >= minimumHistoryCount {
+            if let (bestCorrection, count) = corrections.max(by: { $0.value < $1.value }) {
+                let isSingleCJK = original.count == 1 && original.unicodeScalars.allSatisfy({ isCJK($0) })
+                let threshold = isSingleCJK ? 3 : minimumHistoryCount
+                guard count >= threshold else { continue }
                 map[original] = bestCorrection
                 DebugLog.log(.correction, "Correction map: \"\(original)\" → \"\(bestCorrection)\" (count: \(count))")
             }
@@ -164,28 +247,27 @@ struct AlternativeSwap {
         correctionMap: [String: String],
         contextKeywords: Set<String> = []
     ) -> String? {
-        // Never touch high-confidence words.
-        guard word.confidence < confidenceThreshold else { return nil }
-
         let key = word.text.lowercased()
 
-        // Check if the primary word itself has a known correction.
+        // History-based correction: user has corrected this word before.
+        // Always apply regardless of confidence — user corrections are authoritative.
         if let corrected = correctionMap[key] {
-            DebugLog.log(.pipeline, "L1 history: \"\(word.text)\" → \"\(corrected)\"")
+            DebugLog.log(.pipeline, "L1 history: \"\(word.text)\" → \"\(corrected)\" (conf=\(String(format: "%.2f", word.confidence)))")
             return corrected
         }
 
-        // Check if any alternative matches a known correction target.
+        // Check alternatives against correction map (also ignores confidence).
         for alt in word.alternatives {
             let altKey = alt.lowercased()
             if let corrected = correctionMap[altKey] {
-                DebugLog.log(.pipeline, "L1 history: \"\(alt)\" → \"\(corrected)\"")
+                DebugLog.log(.pipeline, "L1 history-alt: \"\(word.text)\"→\"\(alt)\" → \"\(corrected)\"")
                 return corrected
             }
         }
 
-        // Screen context: if a low-confidence word's alternative matches a screen keyword,
-        // prefer it over the primary transcription.
+        // Context keywords and alternatives: only for low-confidence words.
+        guard word.confidence < confidenceThreshold else { return nil }
+
         if !contextKeywords.isEmpty {
             for alt in word.alternatives {
                 if contextKeywords.contains(alt.lowercased()) {

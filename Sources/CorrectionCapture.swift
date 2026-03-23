@@ -43,10 +43,9 @@ final class CorrectionCapture {
 
     /// Start monitoring for user corrections after text injection.
     func startWindow(insertedText: String, rawText: String, app: AppIdentity) {
-        // Cancel any in-progress capture from a previous session.
-        if isMonitoring {
-            endCapture(reason: "new session started")
-        }
+        // Always clean up any previous session — even if isMonitoring is stale due to
+        // thread-safety issues, force cleanup to prevent session leaks.
+        endCapture(reason: "new session started")
 
         self.insertedText = insertedText
         self.rawText = rawText
@@ -238,9 +237,11 @@ final class CorrectionCapture {
                 let afterPrompt = String(line.dropFirst(prefix.count))
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !afterPrompt.isEmpty {
+                    DebugLog.log(.correction, "Terminal read via prompt prefix: \"\(afterPrompt.prefix(60))\"", level: .debug)
                     return afterPrompt
                 }
             }
+            DebugLog.log(.correction, "Terminal prompt prefix search failed", level: .debug)
         }
 
         // Fallback: search for a line that starts with the same prefix as insertedText.
@@ -443,7 +444,8 @@ final class CorrectionCapture {
         DebugLog.log(.correction, "Compare: inserted=\"\(insertedText)\" final=\"\(finalText)\" similarity=\(String(format: "%.2f", similarity)) lengthRatio=\(String(format: "%.2f", lengthRatio))")
 
         // Only capture if within reasonable bounds (actual correction, not rewrite).
-        if similarity > 0.3 && similarity < 1.0 && lengthRatio > 0.5 && lengthRatio < 2.0 {
+        // lengthRatio up to 3.0: users often append to injected text.
+        if similarity > 0.3 && similarity < 1.0 && lengthRatio > 0.5 && lengthRatio < 3.0 {
             let quality = similarity * min(lengthRatio, 1.0 / lengthRatio)
 
             let entry = CorrectionEntry(
@@ -532,7 +534,7 @@ final class CorrectionCapture {
 
             DebugLog.log(.correction, "Claude history compare: inserted=\"\(savedInsertedText.prefix(40))\" final=\"\(userText.prefix(40))\" similarity=\(String(format: "%.2f", similarity)) lengthRatio=\(String(format: "%.2f", lengthRatio))")
 
-            if similarity > 0.3 && similarity < 1.0 && lengthRatio > 0.5 && lengthRatio < 2.0 {
+            if similarity > 0.3 && similarity < 1.0 && lengthRatio > 0.5 && lengthRatio < 3.0 {
                 let quality = similarity * min(lengthRatio, 1.0 / lengthRatio)
                 let entry = CorrectionEntry(
                     id: UUID().uuidString,
@@ -557,7 +559,9 @@ final class CorrectionCapture {
 
     func endCapture(reason: String) {
         guard isMonitoring else { return }
-        DebugLog.log(.correction, "Capture ended: \(reason)")
+        if reason != "new session started" {
+            DebugLog.log(.correction, "Capture ended: \(reason)")
+        }
         isMonitoring = false
 
         captureTimer?.invalidate()

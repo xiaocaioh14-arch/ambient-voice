@@ -96,7 +96,7 @@ def main():
     ratio = len(user_command) / max(len(inserted_text), 1)
 
     # Only capture if it looks like a correction (not a complete rewrite)
-    if not (sim > 0.3 and sim < 1.0 and ratio > 0.5 and ratio < 2.0):
+    if not (sim > 0.3 and sim < 1.0 and ratio > 0.5 and ratio < 3.0):
         return
 
     quality = sim * min(ratio, 1.0 / max(ratio, 0.01))
