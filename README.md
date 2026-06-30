@@ -47,7 +47,13 @@ Hold Right Option
 }
 ```
 
-`~/.we/dictionary.json` — your private terms. Distillation uses these to correct misrecognized words.
+`~/.we/dictionary.json` — your private terms. L1 dictionary correction (voice input + meeting mode) and distillation use these to fix misrecognized words.
+
+A seed dictionary ships at [`client/dictionary.seed.json`](client/dictionary.seed.json) (the author's telecom/subsea terms). To start, copy it and replace the entries with your own:
+
+```bash
+cp client/dictionary.seed.json ~/.we/dictionary.json
+```
 
 ```json
 { "terms": ["Claude Code", "MCP", "蒸馏", "微调", "ollama"] }
