@@ -128,15 +128,16 @@ final class MeetingSession {
 
                         if result.isFinal {
                             let timeRange = self.extractTimeRange(from: result.text)
+                            let corrected = DictionaryCorrector.shared.correct(text)
                             let entry = SegmentBuffer.Entry(
-                                text: text,
+                                text: corrected,
                                 startTime: timeRange.start,
                                 endTime: timeRange.start + timeRange.duration
                             )
                             self.currentVolatileText = ""
 
-                            Logger.log("Meeting", "[Bench] Final: \"\(text.prefix(40))\" [\(String(format: "%.1f", timeRange.start))-\(String(format: "%.1f", timeRange.start + timeRange.duration))s]")
-                            self.onTranscriptUpdate?(text, true)
+                            Logger.log("Meeting", "[Bench] Final: \"\(corrected.prefix(40))\" [\(String(format: "%.1f", timeRange.start))-\(String(format: "%.1f", timeRange.start + timeRange.duration))s]")
+                            self.onTranscriptUpdate?(corrected, true)
                             await self.segmentBuffer?.feed(entry)
                         } else {
                             self.currentVolatileText = text
@@ -314,15 +315,16 @@ final class MeetingSession {
                     if result.isFinal {
                         // 提取 audioTimeRange
                         let timeRange = self.extractTimeRange(from: result.text)
+                        let corrected = DictionaryCorrector.shared.correct(text)
                         let entry = SegmentBuffer.Entry(
-                            text: text,
+                            text: corrected,
                             startTime: timeRange.start,
                             endTime: timeRange.start + timeRange.duration
                         )
                         self.currentVolatileText = ""
 
-                        Logger.log("Meeting", "Final: \"\(text)\" [\(String(format: "%.1f", timeRange.start))-\(String(format: "%.1f", timeRange.start + timeRange.duration))s]")
-                        self.onTranscriptUpdate?(text, true)
+                        Logger.log("Meeting", "Final: \"\(corrected)\" [\(String(format: "%.1f", timeRange.start))-\(String(format: "%.1f", timeRange.start + timeRange.duration))s]")
+                        self.onTranscriptUpdate?(corrected, true)
                         await self.segmentBuffer?.feed(entry)
                     } else {
                         self.currentVolatileText = text

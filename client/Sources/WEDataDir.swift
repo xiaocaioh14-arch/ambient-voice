@@ -66,6 +66,7 @@ enum WEDataDir {
     static var meetingHistoryURL: URL { url.appendingPathComponent(FileName.meetingHistory) }
     static var correctionsURL: URL    { url.appendingPathComponent(FileName.corrections) }
     static var correctionDictURL: URL { url.appendingPathComponent(FileName.correctionDict) }
+    static var contextualDictURL: URL { url.appendingPathComponent(FileName.contextualDict) }
 
     // MARK: - 派生路径（按时间戳产生）
 
