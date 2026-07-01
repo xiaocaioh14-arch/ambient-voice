@@ -15,8 +15,11 @@ final class VoicePipeline {
         let rawText = transcription.fullText
         Logger.log("Pipeline", "Raw: \(rawText)")
 
-        // L1: 信任 Apple 官方排序，不做任何修改
-        let l1Text = rawText
+        // L1: 词典强制纠错（专有名词 / 同音字 / 领域术语），确定性，读 ~/.we/dictionary.json
+        let l1Text = DictionaryCorrector.shared.correct(rawText)
+        if l1Text != rawText {
+            Logger.log("Pipeline", "L1: dict corrected \"\(rawText.prefix(30))\" -> \"\(l1Text.prefix(30))\"")
+        }
 
         // L2: 模型润色（polish.enabled = false 时跳过）
         let finalText: String
